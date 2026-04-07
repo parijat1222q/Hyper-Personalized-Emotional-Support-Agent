@@ -1,0 +1,81 @@
+version: "3.8"
+
+services:
+  # The Core Gateway (Frictionless ingress)
+  gateway-go:
+    build: ./gateway-go
+    container_name: omnimind-gateway-go
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator-node:${NODE_PORT:-4000}/api/analyze
+    depends_on:
+      - orchestrator-node
+    networks:
+      - omninet
+
+  # The Orchestrator (Central Nervous System)
+  orchestrator-node:
+    build: ./orchestrator-node
+    container_name: omnimind-orchestrator-node
+    # Syncs local code for extremely fast Dev iteration without rebuilding
+    volumes:
+      - ./orchestrator-node:/app
+      - /app/node_modules
+    ports:
+      - "${NODE_PORT:-4000}:4000"
+    environment:
+      - REDIS_URL=redis://redis-memory:${REDIS_PORT:-6379}
+    depends_on:
+      - redis-memory
+    networks:
+      - omninet
+
+  # Neo4j: Temporal Knowledge Graph (Long-term Memory)
+  neo4j-graph:
+    image: neo4j:5.26.0
+    container_name: omnimind-neo4j-graph
+    ports:
+      - "7474:7474" # HTTP Browser
+      - "7687:7687" # Bolt Protocol
+    environment:
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/password}
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - omninet
+
+  # Redis: Immediate Working Memory / Queue (Short-term Memory)
+  redis-memory:
+    image: redis:7-alpine
+    container_name: omnimind-redis-memory
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - omninet
+
+  # Placeholder for AI Python logic
+  ai-python:
+    image: alpine:latest
+    container_name: omnimind-ai-python
+    command: tail -f /dev/null
+    networks:
+      - omninet
+
+  # Placeholder for Next.js Cyberpunk UI
+  frontend-nextjs:
+    image: alpine:latest
+    container_name: omnimind-frontend-nextjs
+    command: tail -f /dev/null
+    networks:
+      - omninet
+
+networks:
+  omninet:
+    driver: bridge
+
+volumes:
+  neo4j_data:
+  redis_data:
