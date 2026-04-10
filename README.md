@@ -1,6 +1,6 @@
 # OmniMind — Empathetic Mental Health AI
 
-> **Track B Competition Submission** · A stateful, multi-layered conversational AI that goes far beyond basic RAG. Built on an "antigravity" microservices philosophy — fluid, effortless, and infinitely scalable.
+> **Track B Competition Submission** · A stateful, multi-layered conversational AI that goes far beyond basic RAG. Built on a microservices philosophy — fluid, effortless, and infinitely scalable.
 
 ---
 
