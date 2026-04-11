@@ -18,11 +18,11 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Gemma 4 / Hugging Face Environment Variables
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-HF_MODEL_NAME = os.getenv("HF_MODEL_NAME", "google/gemma-4-E4B-Instruct")
+HF_MODEL_NAME = os.getenv("HF_MODEL_NAME", "google/gemma-4-E4B-it")
 
 # Initialize OpenAI wrapper pointing to Hugging Face Serverless API
 llm_client = OpenAI(
-    base_url="https://api-inference.huggingface.co/v1/",
+    base_url="https://router.huggingface.co/hf-inference/v1",
     api_key=HF_TOKEN
 )
 
