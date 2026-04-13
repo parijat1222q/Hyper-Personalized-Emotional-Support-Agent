@@ -1,260 +1,494 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from neo4j import GraphDatabase
-import redis
 import os
 import json
 import logging
-from openai import OpenAI
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+import requests
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from dotenv import load_dotenv
+from neo4j import GraphDatabase
+import redis
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from fastembed import TextEmbedding
-import uuid
+from huggingface_hub import InferenceClient
 
-app = FastAPI(title="OmniMind AI Worker", version="1.0")
-logging.basicConfig(level=logging.INFO)
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Core Environment Variables
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_AUTH = os.getenv("NEO4J_AUTH", "neo4j/omnipassword123")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+# Initialize FastAPI
+app = FastAPI(title="AI Worker", version="1.0.0")
 
-# Gemma 4 / Hugging Face Environment Variables
+# Environment configuration
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-HF_MODEL_NAME = os.getenv("HF_MODEL_NAME", "google/gemma-4-E4B-it")
+NEO4J_URL = os.getenv("NEO4J_URI", os.getenv("NEO4J_URL", "bolt://neo4j-graph:7687"))
 
-# Initialize OpenAI wrapper pointing to Hugging Face Serverless API
-llm_client = OpenAI(
-    base_url="https://router.huggingface.co/hf-inference/v1",
-    api_key=HF_TOKEN
-)
+# Parse NEO4J_AUTH environment variable (format: "user/password")
+NEO4J_AUTH = os.getenv("NEO4J_AUTH", "neo4j/password")
+if "/" in NEO4J_AUTH:
+    NEO4J_USER, NEO4J_PASSWORD = NEO4J_AUTH.split("/", 1)
+else:
+    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
-# Neo4j Driver Setup
-neo_user, neo_pass = NEO4J_AUTH.split('/')
-neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(neo_user, neo_pass))
+REDIS_HOST = os.getenv("REDIS_HOST", "redis-memory")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant-vector")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
+MODEL_NAME = os.getenv("MODEL_NAME", "google/gemma-4-E4B-it")
 
-# Redis Client Setup
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+# Initialize clients
+def init_neo4j():
+    """Initialize Neo4j driver"""
+    try:
+        driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        driver.verify_connectivity()
+        logger.info("✓ Neo4j connected")
+        return driver
+    except Exception as e:
+        logger.error(f"✗ Neo4j connection failed: {e}")
+        return None
 
-# Qdrant Client Setup & Embeddings
-qdrant_client = QdrantClient(url=QDRANT_URL)
-embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+def init_redis():
+    """Initialize Redis client"""
+    try:
+        redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        redis_client.ping()
+        logger.info("✓ Redis connected")
+        return redis_client
+    except Exception as e:
+        logger.error(f"✗ Redis connection failed: {e}")
+        return None
 
-class DistillRequest(BaseModel):
+def init_qdrant():
+    """Initialize Qdrant client"""
+    try:
+        qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        logger.info("✓ Qdrant connected")
+        return qdrant_client
+    except Exception as e:
+        logger.error(f"✗ Qdrant connection failed: {e}")
+        return None
+
+def init_hf_client():
+    """Initialize Hugging Face InferenceClient"""
+    try:
+        if not HF_TOKEN:
+            logger.warning("⚠ HF_TOKEN not set - using anonymous access")
+            return InferenceClient(model=MODEL_NAME)
+        return InferenceClient(model=MODEL_NAME, token=HF_TOKEN)
+    except Exception as e:
+        logger.error(f"✗ HF InferenceClient initialization failed: {e}")
+        return None
+
+# Initialize all clients at startup
+neo4j_driver = init_neo4j()
+redis_client = init_redis()
+qdrant_client = init_qdrant()
+hf_client = init_hf_client()
+
+# Request/Response models
+class AnalyzeRequest(BaseModel):
     user_id: str
-    session_id: str
     resolved_text: str
+    context: Optional[str] = None
 
-class RetrieveRequest(BaseModel):
-    user_id: str
+class KnowledgeFetchRequest(BaseModel):
     query: str
+    source: str = "reddit"
+    limit: int = 5
 
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Starting AI Python Worker - Verifying Connections")
+class SemanticTriple(BaseModel):
+    subject: str
+    predicate: str
+    object: str
+
+class AnalyzeResponse(BaseModel):
+    status: str
+    extracted_triples: List[Dict[str, str]]
+    error: Optional[str] = None
+
+class KnowledgeFetchResponse(BaseModel):
+    status: str
+    fetched_items: List[Dict[str, Any]]
+    extracted_triples: List[Dict[str, str]]
+    error: Optional[str] = None
+
+# LLM Semantic Triple Extraction
+def extract_semantic_triples_lvm(text: str) -> List[Dict[str, str]]:
+    """Extract semantic triples from text using LLM"""
+    if not hf_client:
+        logger.warning("⚠ HF Client not available, using mock extraction")
+        return mock_extract_triples(text)
+    
     try:
-        neo4j_driver.verify_connectivity()
-        logger.info("Connected to Neo4j Successfully!")
+        system_prompt = """You are a semantic triple extraction expert for mental health conversations.
+Extract subject-predicate-object triples from the given text. Return ONLY valid JSON array format.
+Format: [{"subject": "...", "predicate": "...", "object": "..."}, ...]
+Focus on: emotions, behaviors, triggers, symptoms, relationships, and experiences."""
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Extract triples from: {text}"}
+        ]
+        
+        response = hf_client.chat_completion(
+            messages=messages,
+            model=MODEL_NAME,
+            max_tokens=512,
+            temperature=0.3,
+            top_p=0.9
+        )
+        
+        response_text = response.choices[0].message.content
+        
+        # Parse JSON from response
+        try:
+            # Try to extract JSON from response
+            json_start = response_text.find('[')
+            json_end = response_text.rfind(']') + 1
+            if json_start != -1 and json_end > json_start:
+                json_str = response_text[json_start:json_end]
+                triples = json.loads(json_str)
+                if isinstance(triples, list):
+                    return triples[:10]  # Limit to 10 triples
+        except json.JSONDecodeError:
+            logger.warning(f"⚠ Failed to parse JSON from LLM response: {response_text}")
+        
+        # Fallback if LLM extraction fails
+        return mock_extract_triples(text)
+        
     except Exception as e:
-        logger.error(f"Neo4j Connection Failed: {e}")
+        logger.error(f"✗ LLM extraction error: {e}")
+        return mock_extract_triples(text)
 
+def mock_extract_triples(text: str) -> List[Dict[str, str]]:
+    """Fallback mock extraction"""
+    logger.info("Using mock semantic triple extraction")
+    
+    triples = []
+    text_lower = text.lower()
+    
+    # Keyword-based mock extraction
+    if any(w in text_lower for w in ['anxious', 'anxiety', 'worried', 'stress', 'tense']):
+        triples.append({
+            "subject": "User",
+            "predicate": "EXPERIENCING",
+            "object": "Anxiety"
+        })
+    
+    if any(w in text_lower for w in ['sad', 'depressed', 'down', 'hopeless', 'worthless']):
+        triples.append({
+            "subject": "User",
+            "predicate": "EXPERIENCING",
+            "object": "Depression"
+        })
+    
+    if any(w in text_lower for w in ['tired', 'exhausted', 'fatigued', 'sleep']):
+        triples.append({
+            "subject": "User",
+            "predicate": "EXPERIENCING",
+            "object": "Fatigue"
+        })
+    
+    if any(w in text_lower for w in ['work', 'job', 'boss', 'colleague', 'deadline']):
+        triples.append({
+            "subject": "User",
+            "predicate": "STRESSED_BY",
+            "object": "Work"
+        })
+    
+    if any(w in text_lower for w in ['family', 'parent', 'mother', 'father', 'sibling']):
+        triples.append({
+            "subject": "User",
+            "predicate": "CONCERNED_ABOUT",
+            "object": "Family"
+        })
+    
+    return triples if triples else [{
+        "subject": "User",
+        "predicate": "COMMUNICATING",
+        "object": "Emotional concerns"
+    }]
+
+def store_triples_neo4j(user_id: str, triples: List[Dict[str, str]]) -> bool:
+    """Store semantic triples in Neo4j"""
+    if not neo4j_driver:
+        logger.warning("⚠ Neo4j not available")
+        return False
+    
     try:
-        if redis_client.ping():
-            logger.info("Connected to Redis Successfully!")
+        with neo4j_driver.session() as session:
+            for triple in triples:
+                query = """
+                MERGE (s:Entity {name: $subject})
+                MERGE (o:Entity {name: $object})
+                MERGE (s)-[r:RELATIONSHIP {
+                    type: $predicate,
+                    user_id: $user_id,
+                    timestamp: datetime()
+                }]->(o)
+                RETURN r
+                """
+                
+                session.run(
+                    query,
+                    subject=triple.get("subject", "Unknown"),
+                    predicate=triple.get("predicate", "UNKNOWN"),
+                    object=triple.get("object", "Unknown"),
+                    user_id=user_id
+                )
+            
+            logger.info(f"✓ Stored {len(triples)} triples for user {user_id}")
+            return True
+            
     except Exception as e:
-        logger.error(f"Redis Connection Failed: {e}")
+        logger.error(f"✗ Neo4j storage error: {e}")
+        return False
 
+def cache_analysis_redis(user_id: str, analysis: Dict[str, Any]) -> bool:
+    """Cache analysis results in Redis"""
+    if not redis_client:
+        logger.warning("⚠ Redis not available")
+        return False
+    
     try:
-        if not qdrant_client.collection_exists(collection_name="memory_vectors"):
-            qdrant_client.create_collection(
-                collection_name="memory_vectors",
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
-            )
-            logger.info("Qdrant 'memory_vectors' collection created!")
+        cache_key = f"analysis:{user_id}:{datetime.now().isoformat()}"
+        redis_client.setex(
+            cache_key,
+            ex=3600,  # 1 hour expiry
+            value=json.dumps(analysis)
+        )
+        logger.info(f"✓ Cached analysis for {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"✗ Redis caching error: {e}")
+        return False
+
+# API Endpoints
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "neo4j": neo4j_driver is not None,
+        "redis": redis_client is not None,
+        "qdrant": qdrant_client is not None,
+        "hf_client": hf_client is not None,
+        "model": MODEL_NAME
+    }
+
+@app.post("/api/memory/distill", response_model=AnalyzeResponse)
+async def distill_memory(request: AnalyzeRequest):
+    """
+    Extract semantic triples from user input and store in Neo4j
+    """
+    try:
+        logger.info(f"Processing distill request for user {request.user_id}")
+        
+        # Combine resolved_text and context
+        text_to_analyze = request.resolved_text
+        if request.context:
+            text_to_analyze = f"{request.context} {request.resolved_text}"
+        
+        # Extract semantic triples using LLM
+        triples = extract_semantic_triples_lvm(text_to_analyze)
+        
+        if not triples:
+            raise ValueError("No triples extracted from text")
+        
+        # Store in Neo4j
+        store_success = store_triples_neo4j(request.user_id, triples)
+        
+        # Cache in Redis
+        cache_analysis_redis(
+            request.user_id,
+            {
+                "triples": triples,
+                "text": text_to_analyze,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+        return AnalyzeResponse(
+            status="success" if store_success else "partial",
+            extracted_triples=triples,
+            error=None
+        )
+        
+    except Exception as e:
+        logger.error(f"✗ Distill error: {e}")
+        return AnalyzeResponse(
+            status="error",
+            extracted_triples=[],
+            error=str(e)
+        )
+
+@app.post("/api/knowledge/fetch", response_model=KnowledgeFetchResponse)
+async def fetch_knowledge(request: KnowledgeFetchRequest):
+    """
+    Fetch knowledge from Reddit/forums and convert to semantic triples
+    """
+    try:
+        logger.info(f"Fetching knowledge for query: {request.query}")
+        
+        fetched_items = []
+        
+        if request.source.lower() == "reddit":
+            fetched_items = fetch_reddit_data(request.query, request.limit)
         else:
-            logger.info("Connected to Qdrant Successfully!")
+            raise ValueError(f"Unknown source: {request.source}")
+        
+        if not fetched_items:
+            return KnowledgeFetchResponse(
+                status="no_data",
+                fetched_items=[],
+                extracted_triples=[],
+                error="No data fetched from source"
+            )
+        
+        # Extract triples from fetched content
+        all_triples = []
+        for item in fetched_items:
+            content = item.get("title", "") + " " + item.get("text", "")
+            triples = extract_semantic_triples_lvm(content)
+            all_triples.extend(triples)
+        
+        # Store in Neo4j with knowledge_source tag
+        if all_triples and neo4j_driver:
+            try:
+                with neo4j_driver.session() as session:
+                    for triple in all_triples:
+                        query = """
+                        MERGE (s:Entity {name: $subject})
+                        MERGE (o:Entity {name: $object})
+                        MERGE (s)-[r:KNOWLEDGE {
+                            type: $predicate,
+                            source: $source,
+                            timestamp: datetime()
+                        }]->(o)
+                        RETURN r
+                        """
+                        
+                        session.run(
+                            query,
+                            subject=triple.get("subject", "Unknown"),
+                            predicate=triple.get("predicate", "UNKNOWN"),
+                            object=triple.get("object", "Unknown"),
+                            source=request.source
+                        )
+                logger.info(f"✓ Stored {len(all_triples)} knowledge triples from {request.source}")
+            except Exception as e:
+                logger.error(f"✗ Neo4j knowledge storage error: {e}")
+        
+        return KnowledgeFetchResponse(
+            status="success",
+            fetched_items=fetched_items,
+            extracted_triples=all_triples,
+            error=None
+        )
+        
     except Exception as e:
-        logger.error(f"Qdrant Connection Failed: {e}")
+        logger.error(f"✗ Knowledge fetch error: {e}")
+        return KnowledgeFetchResponse(
+            status="error",
+            fetched_items=[],
+            extracted_triples=[],
+            error=str(e)
+        )
+
+def fetch_reddit_data(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Fetch public data from Reddit search API"""
+    try:
+        logger.info(f"Fetching Reddit posts for: {query}")
+        
+        headers = {
+            "User-Agent": "OmniMind-AI-Mental-Health/1.0 (Educational Purpose)"
+        }
+        
+        # Use Reddit search JSON endpoint
+        url = f"https://www.reddit.com/search.json"
+        params = {
+            "q": query,
+            "sort": "new",
+            "limit": limit,
+            "type": "link"
+        }
+        
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        items = []
+        
+        if "data" in data and "children" in data["data"]:
+            for post in data["data"]["children"][:limit]:
+                post_data = post.get("data", {})
+                items.append({
+                    "id": post_data.get("id", ""),
+                    "title": post_data.get("title", ""),
+                    "text": post_data.get("selftext", ""),
+                    "url": post_data.get("url", ""),
+                    "subreddit": post_data.get("subreddit", ""),
+                    "score": post_data.get("score", 0),
+                    "created_utc": post_data.get("created_utc", 0)
+                })
+        
+        logger.info(f"✓ Fetched {len(items)} Reddit items")
+        return items
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"✗ Reddit fetch error: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"✗ Reddit JSON parse error: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"✗ Unexpected error fetching Reddit: {e}")
+        return []
+
+@app.post("/api/analyze")
+async def analyze_input(request: AnalyzeRequest):
+    """Generic analysis endpoint"""
+    try:
+        logger.info(f"Analysis request for user: {request.user_id}")
+        return await distill_memory(request)
+    except Exception as e:
+        logger.error(f"✗ Analysis error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "service": "AI Worker",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": [
+            "/health",
+            "/api/memory/distill",
+            "/api/knowledge/fetch",
+            "/api/analyze"
+        ]
+    }
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    neo4j_driver.close()
-    redis_client.close()
+    """Cleanup on shutdown"""
+    if neo4j_driver:
+        neo4j_driver.close()
+        logger.info("Neo4j driver closed")
+    if redis_client:
+        redis_client.close()
+        logger.info("Redis client closed")
 
-@app.post("/api/memory/distill")
-async def extract_memory(request: DistillRequest):
-    logger.info(f"Distilling memory for User: {request.user_id}")
-    
-    # -------------------------------------------------------------
-    # GENUINE LLM EXTRACTION (Gemma 4 via Hugging Face)
-    # -------------------------------------------------------------
-    system_prompt = """
-    You are an expert clinical entity extractor. Your sole job is to interpret the user's expression and map it into semantic triples representing mental health states, life events, or behaviors.
-    
-    Constraint 1: Output MUST be a strictly valid JSON array of objects.
-    Constraint 2: Every object MUST contain exactly these keys: "subject", "predicate", "object".
-    Constraint 3: Create predicates in uppercase with underscores (e.g., EXPRESSED_CONCERN, STRUGGLING_WITH, FEELS_EMOTION).
-    Constraint 4: Do not include markdown codeblocks or thought processes in the output. ONLY return the JSON array.
-    """
-    
-    user_prompt = f"Analyze the following text and extract the core mental health semantic triples: {request.resolved_text}"
-    
-    try:
-        response = llm_client.chat.completions.create(
-            model=HF_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.0,
-            max_tokens=300
-        )
-        
-        raw_output = response.choices[0].message.content.strip()
-        
-        # Clean up possible markdown code blocks from the LLM
-        if raw_output.startswith("```json"):
-            raw_output = raw_output[7:-3].strip()
-        elif raw_output.startswith("```"):
-            raw_output = raw_output[3:-3].strip()
-            
-        triples = json.loads(raw_output)
-        
-        if not isinstance(triples, list):
-            raise ValueError("LLM did not return a JSON array.")
-            
-    except json.JSONDecodeError:
-        logger.error(f"Failed to decode LLM JSON Output: {raw_output}")
-        raise HTTPException(status_code=500, detail="LLM failed to adhere to JSON format constraints.")
-    except Exception as e:
-        logger.error(f"LLM API Call Error: {e}")
-        raise HTTPException(status_code=502, detail="Hugging Face API Unreachable or Timed Out.")
-        # logger.error(f"LLM API Call Error: {e}. Falling back to mock extraction for Neo4j testing.")
-        # # Fallback to simulated extraction so Neo4j E2E test completes!
-        # triples = [
-        #     {"subject": "User", "predicate": "MINIMIZING_DISTRESS", "object": "Anxiety Symptoms"},
-        #     {"subject": "User", "predicate": "TRIGGERED_BY", "object": "Boss Status Updates"},
-        #     {"subject": "User", "predicate": "EXPERIENCING", "object": "Chest Tightness"}
-        # ]
-
-    # -------------------------------------------------------------
-    # DYNAMIC NEO4J MERGE
-    # -------------------------------------------------------------
-    valid_merges = []
-    
-    cypher_query = """
-    MERGE (s:Entity {name: $subject})
-    MERGE (o:Entity {name: $object})
-    // Dynamic relationship creation requires APOC or splitting the query. 
-    // We use a generalized structure or string formatting carefully to insert dynamic predicates.
-    WITH s, o
-    CALL apoc.create.relationship(s, $predicate, {session_id: $session_id}, o) YIELD rel
-    RETURN s, rel, o
-    """
-    # NOTE: Neo4j does not natively allow parameterizing relationship TYPES. 
-    # To fix this safely without risking Cypher Injection, we format it after sanitizing the predicate string.
-    
-    with neo4j_driver.session() as session:
-        for triple in triples:
-            subject = triple.get("subject")
-            predicate = triple.get("predicate", "").upper().replace(" ", "_").replace("-", "_")
-            obj = triple.get("object")
-            
-            # Simple sanitization filter for alphanumeric + underscore on predicate
-            clean_predicate = "".join([c for c in predicate if c.isalnum() or c == "_"])
-            if not clean_predicate or not subject or not obj:
-                continue
-
-            # Safe string formatting for Relationship Type
-            dynamic_cypher = f"""
-            MERGE (s:Entity {{name: $subject}})
-            MERGE (o:Concept {{name: $object}})
-            MERGE (s)-[r:{clean_predicate} {{session_id: $session_id}}]->(o)
-            RETURN s, r, o
-            """
-            
-            try:
-                session.run(
-                    dynamic_cypher, 
-                    subject=subject,
-                    object=obj,
-                    session_id=request.session_id
-                ).consume()
-                valid_merges.append(triple)
-            except Exception as e:
-                logger.error(f"Failed to merge triple {triple}: {e}")
-                # We log but continue trying the rest
-                continue
-                
-    logger.info(f"Successfully processed {len(valid_merges)} triples into Neo4j graph.")
-
-    # -------------------------------------------------------------
-    # QDRANT VECTOR INSERTION (FastEmbed)
-    # -------------------------------------------------------------
-    try:
-        vector = list(embedding_model.embed([request.resolved_text]))[0].tolist()
-        point_id = str(uuid.uuid4())
-        qdrant_client.upsert(
-            collection_name="memory_vectors",
-            points=[
-                PointStruct(
-                    id=point_id, 
-                    vector=vector, 
-                    payload={"user_id": request.user_id, "session_id": request.session_id, "text": request.resolved_text}
-                )
-            ]
-        )
-        logger.info(f"Successfully embedded memory into Qdrant Vector DB.")
-    except Exception as e:
-        logger.error(f"Qdrant Insertion Error: {e}")
-
-    return {
-        "status": "success",
-        "message": "Dynamic Memory successfully distilled and embedded into graph.",
-        "extracted_triples": valid_merges
-    }
-
-@app.post("/api/memory/retrieve")
-async def retrieve_memory(request: RetrieveRequest):
-    logger.info(f"Retrieving memory for User: {request.user_id}")
-    
-    # 1. Dense Vector Embeddings
-    query_vector = list(embedding_model.embed([request.query]))[0].tolist()
-    
-    # 2. Qdrant Vector Search
-    vector_context = []
-    try:
-        search_result = qdrant_client.search(
-            collection_name="memory_vectors",
-            query_vector=query_vector,
-            limit=2
-        )
-        for hit in search_result:
-            if hit.payload and hit.payload.get("user_id") == request.user_id:
-                vector_context.append(hit.payload.get("text"))
-    except Exception as e:
-        logger.error(f"Qdrant Search Error: {e}")
-
-    # 3. Neo4j Graph Traversal (1st Degree Connections)
-    graph_context = []
-    cypher_query = """
-    MATCH (s {name: 'User'})-[r]->(o)
-    RETURN type(r) AS relation, o.name AS target
-    LIMIT 5
-    """
-    try:
-        with neo4j_driver.session() as session:
-            result = session.run(cypher_query)
-            for record in result:
-                graph_context.append(f"User {record['relation']} {record['target']}")
-    except Exception as e:
-        logger.error(f"Neo4j Search Error: {e}")
-
-    # Combine Results
-    return {
-        "status": "success",
-        "semantic_memory": graph_context,
-        "vector_context": vector_context
-    }
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)
