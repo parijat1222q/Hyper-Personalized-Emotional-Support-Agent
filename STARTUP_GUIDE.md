@@ -1,10 +1,11 @@
 # OmniMind - Restart
 
 
----
 
 cd "g:\track b\omnimind"
+
 docker ps -a
+
 docker-compose up -d
 
 docker-compose up -d --build

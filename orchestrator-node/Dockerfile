@@ -11,5 +11,5 @@ COPY . .
 
 EXPOSE 4000
 
-# Start script points to dev environment using npx for reliability
-CMD ["npx", "nodemon", "src/index.ts"]
+# Start script with nodemon config for ESM support
+CMD ["npx", "nodemon"]
