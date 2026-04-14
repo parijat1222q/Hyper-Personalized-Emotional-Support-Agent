@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
 COPY ./app /app/app
+COPY ./scripts /app/scripts
 
 EXPOSE 5000
 
