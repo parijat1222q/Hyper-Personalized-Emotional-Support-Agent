@@ -46,16 +46,22 @@ QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
 MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-120b:fastest")
 
 # Initialize clients
+import time
+
 def init_neo4j():
-    """Initialize Neo4j driver"""
-    try:
-        driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        driver.verify_connectivity()
-        logger.info("✓ Neo4j connected")
-        return driver
-    except Exception as e:
-        logger.error(f"✗ Neo4j connection failed: {e}")
-        return None
+    """Initialize Neo4j driver with retry to survive docker-compose startup drift"""
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            driver.verify_connectivity()
+            logger.info("✓ Neo4j connected")
+            return driver
+        except Exception as e:
+            logger.error(f"✗ Neo4j connection failed (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(4)
+    return None
 
 def init_redis():
     """Initialize Redis client"""
