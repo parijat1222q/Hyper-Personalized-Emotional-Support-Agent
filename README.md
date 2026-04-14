@@ -26,7 +26,7 @@ OmniMind implements a mandatory **4-Layer AI Architecture** designed to read bet
                              ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │        LAYER 3 · Dynamic Knowledge Pipeline & Retrieval         │
-│   Python FastAPI Worker (Gemma 4 via Hugging Face Serverless)   │
+│   Python FastAPI Worker (gpt-oss-120b via HF Inference API)     │
 │   Memory Distillation Endpoint → Neo4j Cypher MERGE Injection   │
 └─────────────────────────────────────────────────────────────────┘
                              ↓
@@ -46,7 +46,7 @@ OmniMind implements a mandatory **4-Layer AI Architecture** designed to read bet
 | **API Gateway** | Go (Golang) | High-performance frictionless ingress, concurrent request routing |
 | **Orchestrator** | Node.js + TypeScript | Central nervous system, safety guardrails, entity resolution |
 | **AI Worker** | Python 3.11 + FastAPI | LLM extraction, memory distillation, Neo4j graph injection |
-| **LLM** | Gemma 4 (`google/gemma-4-E4B-Instruct`) | Semantic triple extraction via Hugging Face Serverless API |
+| **LLM** | gpt-oss-120b (`openai/gpt-oss-120b:fastest`) | Semantic triple extraction via HuggingFace Inference Providers API with automatic multi-provider failover |
 | **Knowledge Graph** | Neo4j 5.26 | Long-term episodic & semantic memory (Temporal Knowledge Graph) |
 | **Working Memory** | Redis 7 | Short-term session context and inter-service message queuing |
 | **Frontend** | Next.js + React | Cyberpunk/Sci-Fi conversational interface *(upcoming)* |
@@ -86,10 +86,11 @@ GATEWAY_PORT=8080
 
 # 🔑 Replace with your actual Hugging Face token
 HF_TOKEN=hf_your_huggingface_token
-HF_MODEL_NAME=google/gemma-4-E4B-Instruct
+HF_MODEL_NAME=openai/gpt-oss-120b:fastest
+MODEL_NAME=openai/gpt-oss-120b:fastest
 ```
 
-> **⚠️ Important**: The `HF_TOKEN` is required for the AI Worker to call Gemma 4. Without it, the `/api/memory/distill` endpoint will return a 502 error.
+> **ℹ️ Note**: The `HF_TOKEN` enables the AI Worker to call HuggingFace Inference Providers API (`https://router.huggingface.co/v1/chat/completions`). The `:fastest` suffix provides automatic server-side failover across multiple providers. The system works reliably without requiring custom fallback logic.
 
 ---
 
@@ -226,10 +227,11 @@ docker-compose down -v
 - [x] Phase 1 — Go API Gateway & Node.js Orchestrator + Safety Guardrails
 - [x] Phase 2 — Docker infrastructure (Neo4j, Redis, Bridge Network, Volumes)
 - [x] Phase 3 — Python AI Worker (FastAPI + Neo4j Cypher integration)
-- [x] Phase 4 — Gemma 4 LLM Extraction via Hugging Face Serverless API
-- [ ] Phase 5 — Hybrid Search Engine (Dense Vector + BM25 + Graph Traversal)
-- [ ] Phase 6 — Next.js Cyberpunk/Sci-Fi Conversational Frontend
-- [ ] Phase 7 — Response Verification Layer (lightweight hallucination checker)
+- [x] Phase 4 — gpt-oss-120b LLM Extraction via HuggingFace Inference Providers API with multi-provider failover
+- [x] Phase 5 — Fallback resilience testing (verified: system works without fallback logic)
+- [ ] Phase 6 — Hybrid Search Engine (Dense Vector + BM25 + Graph Traversal)
+- [ ] Phase 7 — Next.js Cyberpunk/Sci-Fi Conversational Frontend
+- [ ] Phase 8 — Response Verification Layer (lightweight hallucination checker)
 
 ---
 
