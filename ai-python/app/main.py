@@ -42,7 +42,7 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis-memory")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant-vector")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
-MODEL_NAME = os.getenv("MODEL_NAME", "google/gemma-4-E4B-it")
+MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-120b:fastest")
 
 # Initialize clients
 def init_neo4j():
@@ -263,8 +263,8 @@ def cache_analysis_redis(user_id: str, analysis: Dict[str, Any]) -> bool:
         cache_key = f"analysis:{user_id}:{datetime.now().isoformat()}"
         redis_client.setex(
             cache_key,
-            ex=3600,  # 1 hour expiry
-            value=json.dumps(analysis)
+            3600,  # 1 hour expiry
+            json.dumps(analysis)
         )
         logger.info(f"✓ Cached analysis for {user_id}")
         return True
@@ -335,33 +335,49 @@ async def distill_memory(request: AnalyzeRequest):
 async def fetch_knowledge(request: KnowledgeFetchRequest):
     """
     Fetch knowledge from Reddit/forums and convert to semantic triples
+    WITH QDRANT FALLBACK if external sources fail
     """
     try:
         logger.info(f"Fetching knowledge for query: {request.query}")
         
         fetched_items = []
         
+        # Step 1: Try to fetch from external source (Reddit)
         if request.source.lower() == "reddit":
             fetched_items = fetch_reddit_data(request.query, request.limit)
+            
+            # Step 2: If Reddit returns nothing, FALLBACK to Qdrant knowledge base
+            if not fetched_items:
+                logger.warning(f"⚠ Reddit fetch returned empty for: {request.query}")
+                logger.info("📚 Attempting Qdrant knowledge base fallback...")
+                fallback_items = search_qdrant_knowledge_base(request.query, limit=request.limit)
+                
+                if fallback_items:
+                    fetched_items = fallback_items
+                    logger.info(f"✅ Qdrant fallback provided {len(fallback_items)} techniques")
+                else:
+                    logger.warning("⚠ Qdrant fallback also returned no results")
         else:
             raise ValueError(f"Unknown source: {request.source}")
         
+        # Step 3: Return appropriate response
         if not fetched_items:
             return KnowledgeFetchResponse(
                 status="no_data",
                 fetched_items=[],
                 extracted_triples=[],
-                error="No data fetched from source"
+                error="No data available from source or fallback"
             )
         
-        # Extract triples from fetched content
+        # Step 4: Extract triples from fetched content
         all_triples = []
         for item in fetched_items:
             content = item.get("title", "") + " " + item.get("text", "")
+            # ✅ LLM extraction has fallback at this level
             triples = extract_semantic_triples_lvm(content)
             all_triples.extend(triples)
         
-        # Store in Neo4j with knowledge_source tag
+        # Step 5: Store in Neo4j with knowledge_source tag
         if all_triples and neo4j_driver:
             try:
                 with neo4j_driver.session() as session:
@@ -397,12 +413,73 @@ async def fetch_knowledge(request: KnowledgeFetchRequest):
         
     except Exception as e:
         logger.error(f"✗ Knowledge fetch error: {e}")
+        # Last resort: Try Qdrant fallback even on exception
+        logger.info("🚨 Exception caught - attempting final Qdrant fallback...")
+        try:
+            fallback_items = search_qdrant_knowledge_base(request.query, limit=3)
+            if fallback_items:
+                logger.info(f"✅ Final fallback provided {len(fallback_items)} techniques")
+                return KnowledgeFetchResponse(
+                    status="success",
+                    fetched_items=fallback_items,
+                    extracted_triples=[],
+                    error=None
+                )
+        except:
+            pass
+        
         return KnowledgeFetchResponse(
             status="error",
             fetched_items=[],
             extracted_triples=[],
             error=str(e)
         )
+
+def search_qdrant_knowledge_base(query: str, limit: int = 3) -> List[Dict[str, Any]]:
+    """
+    Search Qdrant knowledge base as fallback when live data unavailable
+    This provides access to pre-ingested mental health techniques
+    """
+    if not qdrant_client:
+        logger.warning("⚠ Qdrant not available for fallback search")
+        return []
+    
+    try:
+        from fastembed import TextEmbedding
+        
+        logger.info(f"🔍 Searching Qdrant knowledge base for: {query}")
+        
+        # Embed query using same model as knowledge base
+        embedding_model = TextEmbedding("BAAI/bge-small-en-v1.5")
+        query_embedding = list(embedding_model.embed(query))[0]
+        
+        # Search Qdrant collection
+        results = qdrant_client.search(
+            collection_name="knowledge_base",
+            query_vector=query_embedding,
+            limit=limit
+        )
+        
+        # Convert Qdrant results to knowledge fetch format
+        items = []
+        for result in results:
+            items.append({
+                "id": str(result.id),
+                "title": result.payload.get("name", "Unknown Technique"),
+                "text": result.payload.get("instructions", ""),
+                "url": f"knowledge_base://technique/{result.id}",
+                "category": result.payload.get("category", "General"),
+                "source": "knowledge_base_fallback",
+                "score": result.score,
+                "effectiveness": result.payload.get("effectiveness", "")
+            })
+        
+        logger.info(f"✅ Qdrant fallback found {len(items)} techniques")
+        return items
+    
+    except Exception as e:
+        logger.error(f"✗ Qdrant fallback search failed: {e}")
+        return []
 
 def fetch_reddit_data(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """Fetch public data from Reddit search API"""
