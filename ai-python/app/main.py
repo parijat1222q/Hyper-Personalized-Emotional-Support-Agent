@@ -2,14 +2,15 @@ import os
 import re
 import json
 import logging
+import asyncio
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
-import requests
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
+from neo4j import AsyncGraphDatabase
 import redis
 from qdrant_client import QdrantClient
 from huggingface_hub import InferenceClient
@@ -48,19 +49,21 @@ MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-120b:fastest")
 # Initialize clients
 import time
 
-def init_neo4j():
-    """Initialize Neo4j driver with retry to survive docker-compose startup drift"""
+async def init_neo4j():
+    """Initialize Neo4j async driver with retry to survive docker-compose startup drift"""
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            driver = GraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
-            driver.verify_connectivity()
-            logger.info("✓ Neo4j connected")
+            driver = AsyncGraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            # Verify connectivity with async call
+            async with driver.session() as session:
+                await session.run("RETURN 1")
+            logger.info("✓ Neo4j async driver connected")
             return driver
         except Exception as e:
             logger.error(f"✗ Neo4j connection failed (attempt {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
-                time.sleep(4)
+                await asyncio.sleep(4)
     return None
 
 def init_redis():
@@ -95,11 +98,23 @@ def init_hf_client():
         logger.error(f"✗ HF InferenceClient initialization failed: {e}")
         return None
 
-# Initialize all clients at startup
-neo4j_driver = init_neo4j()
+# Initialize non-async clients at startup
 redis_client = init_redis()
 qdrant_client = init_qdrant()
 hf_client = init_hf_client()
+
+# Neo4j driver will be initialized in startup event
+neo4j_driver = None
+
+# Global httpx client for async requests
+httpx_client = None
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize async clients on FastAPI startup"""
+    global neo4j_driver, httpx_client
+    neo4j_driver = await init_neo4j()
+    httpx_client = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(max_connections=100))
 
 # Request/Response models
 class AnalyzeRequest(BaseModel):
@@ -224,14 +239,14 @@ Focus on: emotions, behaviors, triggers, symptoms, relationships, and experience
         logger.error(f"✗ LLM extraction error: {e}")
         raise
 
-def store_triples_neo4j(user_id: str, triples: List[Dict[str, str]]) -> bool:
-    """Store semantic triples in Neo4j"""
+async def store_triples_neo4j(user_id: str, triples: List[Dict[str, str]]) -> bool:
+    """Store semantic triples in Neo4j using async driver"""
     if not neo4j_driver:
         logger.warning("⚠ Neo4j not available")
         return False
     
     try:
-        with neo4j_driver.session() as session:
+        async with neo4j_driver.session() as session:
             for triple in triples:
                 query = """
                 MERGE (s:Entity {name: $subject})
@@ -244,7 +259,7 @@ def store_triples_neo4j(user_id: str, triples: List[Dict[str, str]]) -> bool:
                 RETURN r
                 """
                 
-                session.run(
+                await session.run(
                     query,
                     subject=triple.get("subject", "Unknown"),
                     predicate=triple.get("predicate", "UNKNOWN"),
@@ -543,8 +558,8 @@ async def distill_memory(request: AnalyzeRequest):
         if not triples:
             raise ValueError("No triples extracted from text")
         
-        # Store in Neo4j
-        store_success = store_triples_neo4j(request.user_id, triples)
+        # Store in Neo4j - NOW AWAITED
+        store_success = await store_triples_neo4j(request.user_id, triples)
         
         # Cache in Redis
         cache_analysis_redis(
@@ -580,9 +595,9 @@ async def fetch_knowledge(request: KnowledgeFetchRequest):
         
         fetched_items = []
         
-        # Fetch from external source (Reddit)
+        # Fetch from external source (Reddit) - NOW AWAITED
         if request.source.lower() == "reddit":
-            fetched_items = fetch_reddit_data(request.query, request.limit)
+            fetched_items = await fetch_reddit_data(request.query, request.limit)
         else:
             raise ValueError(f"Unknown source: {request.source}")
         
@@ -602,10 +617,10 @@ async def fetch_knowledge(request: KnowledgeFetchRequest):
             triples = extract_semantic_triples_lvm(content)
             all_triples.extend(triples)
         
-        # Store in Neo4j with knowledge_source tag
+        # Store in Neo4j with knowledge_source tag - NOW AWAITED
         if all_triples and neo4j_driver:
             try:
-                with neo4j_driver.session() as session:
+                async with neo4j_driver.session() as session:
                     for triple in all_triples:
                         query = """
                         MERGE (s:Entity {name: $subject})
@@ -618,7 +633,7 @@ async def fetch_knowledge(request: KnowledgeFetchRequest):
                         RETURN r
                         """
                         
-                        session.run(
+                        await session.run(
                             query,
                             subject=triple.get("subject", "Unknown"),
                             predicate=triple.get("predicate", "UNKNOWN"),
@@ -646,8 +661,14 @@ async def fetch_knowledge(request: KnowledgeFetchRequest):
             error=str(e)
         )
 
-def fetch_reddit_data(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """Fetch public data from Reddit search API"""
+async def fetch_reddit_data(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Fetch public data from Reddit search API using async httpx"""
+    global httpx_client
+    
+    if not httpx_client:
+        logger.error("✗ HTTPX client not initialized")
+        return []
+    
     try:
         logger.info(f"Fetching Reddit posts for: {query}")
         
@@ -664,7 +685,8 @@ def fetch_reddit_data(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             "type": "link"
         }
         
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        # Non-blocking async request
+        response = await httpx_client.get(url, params=params, headers=headers, timeout=10.0)
         response.raise_for_status()
         
         data = response.json()
@@ -686,8 +708,8 @@ def fetch_reddit_data(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         logger.info(f"✓ Fetched {len(items)} Reddit items")
         return items
         
-    except requests.exceptions.RequestException as e:
-        logger.error(f"✗ Reddit fetch error: {e}")
+    except httpx.RequestError as e:
+        logger.error(f"✗ Reddit fetch request error: {e}")
         return []
     except json.JSONDecodeError as e:
         logger.error(f"✗ Reddit JSON parse error: {e}")
@@ -862,8 +884,8 @@ Respond concisely but thoroughly. Be genuine and helpful. NEVER start responses 
         logger.error(traceback.format_exc())
         raise
 
-def store_response_neo4j(user_id: str, query: str, response_text: str, tone: str, confidence: float) -> str:
-    """Store generated response in Neo4j with metadata"""
+async def store_response_neo4j(user_id: str, query: str, response_text: str, tone: str, confidence: float) -> str:
+    """Store generated response in Neo4j with metadata using async driver"""
     if not neo4j_driver:
         logger.warning("⚠ Neo4j not available for response storage")
         return ""
@@ -873,7 +895,7 @@ def store_response_neo4j(user_id: str, query: str, response_text: str, tone: str
         response_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
         
-        with neo4j_driver.session() as session:
+        async with neo4j_driver.session() as session:
             cypher = """
             MERGE (u:User {id: $user_id})
             MERGE (g:GeneratedResponse {
@@ -894,7 +916,7 @@ def store_response_neo4j(user_id: str, query: str, response_text: str, tone: str
             RETURN g.id as response_id
             """
             
-            result = session.run(
+            result = await session.run(
                 cypher,
                 user_id=user_id,
                 response_id=response_id,
@@ -1018,9 +1040,10 @@ def search_keyword_bm25(query: str, documents: List[str], limit: int = 3) -> Lis
         logger.error(f"✗ BM25 search error: {e}")
         return []
 
-def search_graph_neo4j(user_id: str, limit: int = 3) -> List[tuple]:
+async def search_graph_neo4j(user_id: str, limit: int = 3) -> List[tuple]:
     """
     Graph traversal in Neo4j to find user's episodic memories (1-2 hops)
+    Uses async driver
     Returns: [(id, relevance_score, data), ...]
     """
     if not neo4j_driver:
@@ -1030,7 +1053,7 @@ def search_graph_neo4j(user_id: str, limit: int = 3) -> List[tuple]:
     try:
         logger.info(f"🔍 Neo4j graph traversal for user: {user_id}")
         
-        with neo4j_driver.session() as session:
+        async with neo4j_driver.session() as session:
             # Cypher query: Find entities related to user through relationships
             query = """
             MATCH (s:Entity)-[r:RELATIONSHIP {user_id: $user_id}]->(o:Entity)
@@ -1045,13 +1068,13 @@ def search_graph_neo4j(user_id: str, limit: int = 3) -> List[tuple]:
                 0.7 as relevance_score
             """
             
-            results = session.run(query, user_id=user_id, limit=limit)
+            results = await session.run(query, user_id=user_id, limit=limit)
             
             graph_results = []
-            for idx, record in enumerate(results):
+            async for record in results:
                 result_data = record.data()
                 graph_results.append((
-                    f"graph_{idx}",
+                    f"graph_{len(graph_results)}",
                     float(result_data.get("relevance_score", 0.5)),
                     {
                         "title": result_data.get("title", "Unknown Memory"),
@@ -1097,8 +1120,8 @@ async def retrieve_memory(request: MemoryRetrieveRequest):
             if keyword_results:
                 results_dict["keyword"] = keyword_results
         
-        # 3. GRAPH TRAVERSAL: Neo4j episodic memories
-        graph_results = search_graph_neo4j(request.user_id, limit=request.top_k)
+        # 3. GRAPH TRAVERSAL: Neo4j episodic memories - NOW AWAITED
+        graph_results = await search_graph_neo4j(request.user_id, limit=request.top_k)
         if graph_results:
             results_dict["graph"] = graph_results
         
@@ -1210,8 +1233,8 @@ async def generate_response(request: GenerateRequest):
             tone=request.tone
         )
         
-        # STEP 3: Store response in Neo4j
-        response_id = store_response_neo4j(
+        # STEP 3: Store response in Neo4j - NOW AWAITED
+        response_id = await store_response_neo4j(
             user_id=request.user_id,
             query=request.query,
             response_text=response_text,
@@ -1289,9 +1312,13 @@ async def root():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
+    global httpx_client
+    if httpx_client:
+        await httpx_client.aclose()
+        logger.info("HTTPX client closed")
     if neo4j_driver:
-        neo4j_driver.close()
-        logger.info("Neo4j driver closed")
+        await neo4j_driver.close()
+        logger.info("Neo4j async driver closed")
     if redis_client:
         redis_client.close()
         logger.info("Redis client closed")
