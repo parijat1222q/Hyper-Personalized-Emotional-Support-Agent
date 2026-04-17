@@ -1,276 +1,385 @@
-# OmniMind — Empathetic Mental Health AI
+# OmniMind - Empathetic Mental Health AI
 
-> **Track B Competition Submission** · A stateful, multi-layered conversational AI that goes far beyond basic RAG. Built on a microservices philosophy — fluid, effortless, and infinitely scalable.
+Track B competition submission.
 
----
+OmniMind is a multi-service conversational system for mental-health support with:
+- Go gateway for intake routing
+- Node.js orchestrator for safety checks and entity resolution
+- Python FastAPI worker for memory distillation, hybrid retrieval, and response generation
+- Neo4j + Redis + Qdrant memory stack
+- Next.js cyberpunk frontend (implemented and running)
 
-## Architecture Overview
+## Current Status
 
-OmniMind implements a mandatory **4-Layer AI Architecture** designed to read between the lines of human conversation, maintain long-term episodic memory, and generate empathetic, hyper-personalized responses.
+- Full stack runs through `docker-compose`.
+- Frontend is implemented in `frontend-nextjs` and exposed on port `3000`.
+- API pipeline is active end-to-end: `gateway-go -> orchestrator-node -> ai-python`.
+- Phase 8 hallucination checker is integrated in generation flow (`ai-python/app/core/hallucination.py`).
 
+## High-Level Architecture
+
+### Visual System Flow
+
+```mermaid
+graph TD
+    A["👤 User / Frontend<br/>(Next.js on :3000)"] -->|POST content| B["🌐 Go Gateway<br/>:8080<br/>Layer 1: Intake"]
+    B -->|Route| C["🛡️ Node Orchestrator<br/>:4000<br/>Layer 1: Safety + Entity"]
+    C -->|Forward | D["🤖 Python AI Worker<br/>:5000<br/>Layers 3,6,7,8"]
+    
+    D -->|Distill| E["📊 Neo4j<br/>:7687<br/>Graph Memory"]
+    D -->|Cache| F["⚡ Redis<br/>:6379<br/>Session Memory"]
+    D -->|Embed + Search| G["🔍 Qdrant<br/>:6333<br/>Vector Memory"]
+    D -->|Query| H["🧠 Hugging Face<br/>LLM: gpt-oss-120b:fastest"]
+    
+    A -->|View Response| I["✨ Response with<br/>Confidence & Citations"]
+    D -.->|Hallucination Check| I
+    
+    style A fill:#00ffff,stroke:#0088ff,color:#000
+    style B fill:#22ff22,stroke:#00aa00,color:#000
+    style C fill:#ff8800,stroke:#ff4400,color:#000
+    style D fill:#ff00ff,stroke:#cc00cc,color:#fff
+    style E fill:#0088ff,stroke:#0044ff,color:#fff
+    style F fill:#ffaa00,stroke:#ff6600,color:#000
+    style G fill:#88ff00,stroke:#66cc00,color:#000
+    style H fill:#ff0088,stroke:#cc0066,color:#fff
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                LAYER 1 · Message Intake & Analysis              │
-│   Go API Gateway (Omni-Input Handler + Request Routing)         │
-│                             ↓                                   │
-│   Node.js Orchestrator (Multi-Turn Entity Resolution +          │
-│           Safety & Risk Escalation Guardrails)                  │
-└─────────────────────────────────────────────────────────────────┘
-                             ↓
-┌─────────────────────────────────────────────────────────────────┐
-│           LAYER 2 · Temporal Knowledge Graph & Memory           │
-│   Redis (Short-Term Working Memory & Session Queue)             │
-│   Neo4j (Long-Term Episodic/Semantic Knowledge Graph)           │
-│           Stores facts as semantic triples with validity windows │
-└─────────────────────────────────────────────────────────────────┘
-                             ↓
-┌─────────────────────────────────────────────────────────────────┐
-│        LAYER 3 · Dynamic Knowledge Pipeline & Retrieval         │
-│   Python FastAPI Worker (gpt-oss-120b via HF Inference API)     │
-│   Memory Distillation Endpoint → Neo4j Cypher MERGE Injection   │
-└─────────────────────────────────────────────────────────────────┘
-                             ↓
-┌─────────────────────────────────────────────────────────────────┐
-│       LAYER 4 · Contextual Response Generation (Upcoming)       │
-│   Next.js Cyberpunk/Sci-Fi Conversational UI                    │
-│   State Injection → Targeted Prompt Engineering → Response Check│
-└─────────────────────────────────────────────────────────────────┘
+
+### Text Flow
+
+```text
+Client / Frontend (Next.js)
+        |
+        v
+Go Gateway (Layer 1 intake)
+  POST /api/intake → Route to Orchestrator
+        |
+        v
+Node Orchestrator (Layer 1 safety + entity resolution)
+  POST /api/analyze → Safety checks + Entity resolution
+        |
+        v
+Python AI Worker (Layers 3, 6, 7, 8)
+  Memory Distill → Neo4j (store triples)
+  Memory Retrieve → Hybrid search (Vector + BM25 + Graph)
+  Generate → LLM + Hallucination Check + Citations
+  Response → Back to Frontend
+        |
+    ┌───┼───┬────────┐
+    v   v   v        v
+  Neo4j Redis Qdrant HuggingFace
+  Graph  Cache Vector  LLM
+  DB     DB    DB
 ```
 
----
+## Request → Response Pipeline
 
-## System Status
+```mermaid
+sequenceDiagram
+    participant User
+    participant Frontend as Frontend<br/>Next.js
+    participant Gateway as Gateway<br/>Go
+    participant Orchestrator as Orchestrator<br/>Node
+    participant Worker as AI Worker<br/>Python
+    participant Memory as Memory Stack<br/>Neo4j/Redis/Qdrant
+    participant LLM as LLM<br/>HuggingFace
 
-✅ **SYSTEM STABLE & CRASH-FREE**
-
-The OmniMind system has been thoroughly tested and verified to:
-- ✓ Run without crashes or exceptions after removing all fallback logic
-- ✓ Handle all error scenarios gracefully with proper HTTP 200 responses and error status fields
-- ✓ Maintain service availability across all 4 layers (Gateway, Orchestrator, Memory, AI Worker)
-- ✓ Process concurrent requests reliably across the microservices network
-- ✓ Store and retrieve data from Neo4j, Redis, and Qdrant without data loss
-- ✓ Generate empathetic responses with confidence scoring
-
-**All endpoints operational**: `/health`, `/api/memory/distill`, `/api/memory/retrieve`, `/api/generate`, `/api/knowledge/fetch`, `/api/analyze`
-
----
+    User->>Frontend: Type message
+    Frontend->>Gateway: POST /api/intake
+    Gateway->>Orchestrator: Route to /api/analyze
+    Orchestrator->>Orchestrator: Risk check + Entity resolve
+    Orchestrator->>Worker: Forward resolved text
+    Worker->>Memory: Distill triples into graph
+    Worker->>Memory: Hybrid search for context
+    Worker->>LLM: Generate empathetic response
+    LLM->>Worker: Return generated text
+    Worker->>Worker: Hallucination check
+    Worker->>Frontend: Response + confidence + citations
+    Frontend->>User: Display with typewriter effect
+```
 
 ## Tech Stack
 
-| Layer | Technology | Role |
+| Layer | Tech | Purpose |
 |---|---|---|
-| **API Gateway** | Go (Golang) | High-performance frictionless ingress, concurrent request routing |
-| **Orchestrator** | Node.js + TypeScript | Central nervous system, safety guardrails, entity resolution |
-| **AI Worker** | Python 3.11 + FastAPI | LLM extraction, memory distillation, Neo4j graph injection |
-| **LLM** | gpt-oss-120b (`openai/gpt-oss-120b:fastest`) | Semantic triple extraction via HuggingFace Inference Providers API with automatic multi-provider failover |
-| **Knowledge Graph** | Neo4j 5.26 | Long-term episodic & semantic memory (Temporal Knowledge Graph) |
-| **Working Memory** | Redis 7 | Short-term session context and inter-service message queuing |
-| **Frontend** | Next.js + React | Cyberpunk/Sci-Fi conversational interface *(upcoming)* |
-| **Infrastructure** | Docker + Docker Compose | Fully containerized microservices on the `omninet` bridge network |
+| Gateway | Go 1.25 | High-throughput intake and routing |
+| Orchestrator | Node.js + TypeScript + Express | Safety guardrails + entity resolution |
+| AI Worker | Python 3.11 + FastAPI | Distillation, retrieval, response generation |
+| LLM | Hugging Face Inference (`openai/gpt-oss-120b:fastest`) | Semantic extraction + empathetic response |
+| Graph DB | Neo4j 5.26 | Episodic/semantic relationship storage |
+| Cache/Memory | Redis 7 | Session memory + recent conversation |
+| Vector DB | Qdrant | Dense retrieval for hybrid search |
+| Frontend | Next.js 16 + React 19 + Tailwind 4 | Cyberpunk chat UI |
+| Infra | Docker + Docker Compose | Containerized local deployment |
 
----
+## What Each Layer Does
+
+```mermaid
+graph LR
+    subgraph Layer1 ["⚡ LAYER 1: Intake & Safety"]
+        GW["Go Gateway<br/>• High-throughput<br/>• Route requests<br/>• Handle errors"]
+        ORC["Node Orchestrator<br/>• Risk detection<br/>• Entity resolution<br/>• Pronoun fixing"]
+    end
+    
+    subgraph Layer234 ["🧠 LAYER 2-8: Intelligence"]
+        MEM["Memory Layer<br/>• Neo4j triples<br/>• Redis cache<br/>• Qdrant vectors"]
+        LOGIC["Logic Layer<br/>• Distill facts<br/>• Hybrid search<br/>• Generate response<br/>• Check hallucination"]
+    end
+    
+    subgraph Layer9 ["🎨 LAYER 4: UI"]
+        UI["Next.js Frontend<br/>• Chat messages<br/>• Typewriter effect<br/>• Neon/Glass theme"]
+    end
+    
+    GW -->|routes| ORC
+    ORC -->|analyzes| LOGIC
+    LOGIC -->|reads/writes| MEM
+    LOGIC -->|returns| UI
+    UI -->|sends| GW
+    
+    style GW fill:#22ff22,stroke:#00aa00,color:#000
+    style ORC fill:#ff8800,stroke:#ff4400,color:#000
+    style LOGIC fill:#ff00ff,stroke:#cc00cc,color:#fff
+    style MEM fill:#0088ff,stroke:#0044ff,color:#fff
+    style UI fill:#00ffff,stroke:#0088ff,color:#000
+```
+
+## Repository Layout
+
+```text
+omnimind/
+|- docker-compose.yml
+|- README.md
+|- STARTUP_GUIDE.md
+|- ai-python/
+|  |- app/
+|  |  |- api/routes.py
+|  |  |- core/hallucination.py
+|  |  |- db/clients.py
+|  |  |- services/logic.py
+|  |- scripts/ingest_corpus.py
+|- gateway-go/
+|  |- cmd/server/main.go
+|- orchestrator-node/
+|  |- src/index.ts
+|- frontend-nextjs/
+|  |- app/page.tsx
+|  |- app/globals.css
+|  |- Dockerfile
+```
 
 ## Prerequisites
 
-Before you begin, ensure you have the following installed:
+- Docker Desktop (running)
+- Hugging Face token with inference access
 
-- **Docker Desktop** (required) — running with WSL2 or Hyper-V backend recommended
-- **Git**
-- A **Hugging Face account** with a valid API token ([get one here](https://huggingface.co/settings/tokens))
+Optional for local non-Docker development:
+- Node.js
+- Python 3.11
+- Go
 
----
+## Environment Setup
 
-## Setup & Configuration
+Create `.env` at the project root (or copy from `example.env`) and fill values:
 
-### 1. Clone the Repository
-
-```bash
-git clone <your-repo-url>
-cd omnimind
-```
-
-### 2. Configure Environment Variables
-
-Copy the `.env` file and fill in your secrets. **Never commit your real token to Git.**
-
-```bash
-# .env — edit this file before running docker-compose
+```env
 NEO4J_AUTH=neo4j/omnipassword123
 REDIS_PORT=6379
 NODE_PORT=4000
 GATEWAY_PORT=8080
-
-# 🔑 Replace with your actual Hugging Face token
-HF_TOKEN=hf_your_huggingface_token
+HF_TOKEN=hf_your_token_here
 HF_MODEL_NAME=openai/gpt-oss-120b:fastest
 MODEL_NAME=openai/gpt-oss-120b:fastest
+QDRANT_URL=http://localhost:6333
 ```
 
-> **ℹ️ Note**: The `HF_TOKEN` enables the AI Worker to call HuggingFace Inference Providers API (`https://router.huggingface.co/v1/chat/completions`). The `:fastest` suffix provides automatic server-side failover across multiple providers. The system has been verified to work reliably **without any fallback logic** — all fallback mechanisms have been removed and the system gracefully handles all error scenarios without crashes.
+Important:
+- `NEO4J_AUTH` is required by the AI worker startup and must be in `username/password` format.
+- Without valid `HF_TOKEN`, generation endpoints will not return model output.
 
----
+## Run the Full Stack
 
-## Quickstart
-
-### Build and Launch the Full Network
-
-Open a terminal in the root `omnimind/` directory and run:
-
-```bash
+```powershell
+cd "g:\track b\omnimind"
 docker-compose up -d --build
+docker-compose ps
 ```
 
-This single command will:
-- Pull the Neo4j, Redis, and base OS images
-- Build the custom Go gateway, Node.js orchestrator, and Python AI worker containers
-- Create the `omninet` internal bridge network
-- Mount persistent volumes for Neo4j and Redis data
+For a quick Docker-first frontend-only rebuild:
 
----
+```powershell
+docker-compose build frontend-nextjs
+docker-compose up -d frontend-nextjs
+```
 
-## Service Access Points
-
-Once all containers are healthy, access each layer via:
+## Service Endpoints
 
 | Service | URL | Notes |
 |---|---|---|
-| **Neo4j Dashboard** | [http://localhost:7474](http://localhost:7474) | Username: `neo4j` / Password: `omnipassword123` |
-| **AI Worker Swagger UI** | [http://localhost:5000/docs](http://localhost:5000/docs) | Interactive endpoint testing: `/health`, `/api/memory/distill`, `/api/memory/retrieve`, `/api/generate` |
-| **Go API Gateway** | `http://localhost:8080/api/intake` | `POST` — Omni-Input Handler |
-| **Node.js Orchestrator** | `http://localhost:4000/api/analyze` | `POST` — Safety & Entity Pipeline |
+| Frontend (Next.js) | http://localhost:3000 | Cyberpunk chat UI |
+| Go Gateway | http://localhost:8080 | `GET /health`, `POST /api/intake` |
+| Node Orchestrator | http://localhost:4000 | `POST /api/analyze` (root returns 404) |
+| Python AI Worker | http://localhost:5000 | Swagger at `/docs` |
+| Neo4j Browser | http://localhost:7474 | default `neo4j / omnipassword123` |
+| Qdrant | http://localhost:6333 | Vector DB API |
+| Redis | localhost:6379 | Internal memory/cache |
 
----
+## API Contracts (Code-Accurate)
 
-## Testing the Complete Pipeline
+### 1) Gateway: `POST /api/intake`
 
-### Test 1: Health Check
-Verify all services are connected:
-```bash
-curl -X GET http://localhost:5000/health
+Request:
+
+```json
+{
+  "user_id": "user_001",
+  "session_id": "sess_001",
+  "content": "I am feeling overwhelmed",
+  "context": {}
+}
 ```
 
-### Test 2: Memory Distillation Pipeline
-Extract semantic triples and store in Neo4j:
-```bash
-curl -X POST http://localhost:5000/api/memory/distill \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_001",
-    "session_id": "sess_abc123",
-    "resolved_text": "I have been feeling really overwhelmed with my workload lately and I cannot sleep."
-  }'
+Response (success):
+
+```json
+{
+  "status": "success",
+  "message": "Request safely routed to orchestrator",
+  "user_id": "user_001",
+  "routed": true,
+  "metadata": {
+    "orchestrator_url": "http://orchestrator-node:4000/api/analyze",
+    "session_id": "sess_001",
+    "timestamp": 1776459921
+  }
+}
 ```
 
-### Test 3: Hybrid Search & Retrieval
-Search across vector embeddings, BM25 keywords, and graph relationships:
-```bash
-curl -X POST http://localhost:5000/api/memory/retrieve \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_001",
-    "query": "How can I manage work stress?",
-    "top_k": 5
-  }'
+### 2) Orchestrator: `POST /api/analyze`
+
+Request:
+
+```json
+{
+  "user_id": "user_001",
+  "content": "I feel stressed and tired"
+}
 ```
 
-### Test 4: Generate Empathetic Response
-Generate contextualized responses and store interaction history:
-```bash
-curl -X POST http://localhost:5000/api/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_001",
-    "user_message": "I am struggling with work stress and cannot focus",
-    "context": "User has reported sleep disruption and work overload"
-  }'
+Behavior:
+- Runs keyword-based risk checks (critical/high/moderate/low).
+- Resolves references with simple pronoun/entity rewriting.
+- For non-critical cases, forwards to AI worker `POST /api/generate` using `query`.
+
+### 3) AI Worker Core Endpoints
+
+`GET /`
+- service metadata and endpoint index
+
+`GET /health`
+- client health for Neo4j, Redis, Qdrant, HF client, httpx
+
+`POST /api/memory/distill`
+
+```json
+{
+  "user_id": "user_001",
+  "resolved_text": "I have trouble sleeping due to stress at work.",
+  "context": {}
+}
 ```
 
-You can visualize all stored nodes and relationships in the **Neo4j Browser** at `http://localhost:7474` by running:
+`POST /api/memory/retrieve`
 
-```cypher
-MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 50
+```json
+{
+  "user_id": "user_001",
+  "query": "work stress",
+  "top_k": 5
+}
 ```
 
----
+`POST /api/knowledge/fetch`
 
-## Project Structure
-
-```
-omnimind/
-├── .env                         # 🔐 Environment secrets (never commit)
-├── .gitignore
-├── docker-compose.yml           # Full service orchestration
-│
-├── gateway-go/                  # Layer 1: Go API Gateway
-│   ├── cmd/server/main.go       # Omni-Input Handler
-│   ├── Dockerfile               # Multi-stage optimized build
-│   └── go.mod
-│
-├── orchestrator-node/           # Layer 1: Node.js Safety & Orchestration
-│   ├── src/index.ts             # Risk Guardrails + Entity Resolution
-│   ├── Dockerfile
-│   ├── package.json
-│   └── tsconfig.json
-│
-├── ai-python/                   # Layer 3: Python AI Memory Worker
-│   ├── app/main.py              # FastAPI + gpt-oss-120b + Neo4j Cypher injection
-│   ├── requirements.txt
-│   ├── scripts/                 # Test scripts
-│   └── Dockerfile
-│
-└── frontend-nextjs/             # Layer 4: Cyberpunk UI (upcoming)
+```json
+{
+  "query": "breathing exercises for anxiety",
+  "source": "reddit",
+  "limit": 10
+}
 ```
 
----
+`POST /api/generate`
 
-## Internal Docker Network
-
-All containers communicate over the `omninet` bridge network using their service names as hostnames:
-
-```
-gateway-go ──→ orchestrator-node:4000
-orchestrator-node ──→ redis-memory:6379
-ai-python ──→ neo4j-graph:7687
-ai-python ──→ redis-memory:6379
-```
-
-Persistent data is stored in named Docker volumes:
-- `omnimind_neo4j_data` — Knowledge Graph nodes and relationships
-- `omnimind_redis_data` — Working memory and queued sessions
-
----
-
-## Stopping the System
-
-To gracefully shut down all containers while preserving your data volumes:
-
-```bash
-docker-compose down
+```json
+{
+  "user_id": "user_001",
+  "session_id": "sess_001",
+  "query": "I feel overwhelmed and anxious",
+  "context": {},
+  "tone": "empathetic",
+  "include_citations": true
+}
 ```
 
-To **also wipe** all stored Neo4j graph data and Redis memory (full reset):
+Notes:
+- `query` is the active request field for generation.
+- `POST /api/analyze` exists as an alias endpoint in AI worker and maps to distillation.
 
-```bash
-docker-compose down -v
+## Quick Smoke Tests
+
+```powershell
+# Gateway health
+Invoke-RestMethod -Uri "http://localhost:8080/health" -Method GET
+
+# AI worker health
+Invoke-RestMethod -Uri "http://localhost:5000/health" -Method GET
+
+# End-to-end through gateway
+Invoke-RestMethod -Uri "http://localhost:8080/api/intake" -Method Post -ContentType "application/json" -Body '{"user_id":"demo_user","session_id":"sess_2","content":"I am nervous about tomorrow"}'
 ```
 
----
+## Knowledge Base Ingestion
 
-## Roadmap
+To populate Qdrant with fallback + scraped mental-health techniques:
 
-- [x] Phase 1 — Go API Gateway & Node.js Orchestrator + Safety Guardrails
-- [x] Phase 2 — Docker infrastructure (Neo4j, Redis, Bridge Network, Volumes)
-- [x] Phase 3 — Python AI Worker (FastAPI + Neo4j Cypher integration)
-- [x] Phase 4 — gpt-oss-120b LLM Extraction via HuggingFace Inference Providers API with multi-provider failover
-- [x] Phase 5 — Fallback resilience testing (verified: system works without fallback logic, all fallback mechanisms removed)
-- [x] Phase 6 — Hybrid Search Engine (Dense Vector + BM25 + Graph Traversal) - `/api/memory/retrieve` endpoint fully operational
-- [x] Phase 7 — Contextual Response Generation (gpt-oss-120b with confidence scoring) - `/api/generate` endpoint fully operational with Neo4j storage
-- [ ] Phase 8 — Next.js Cyberpunk/Sci-Fi Conversational Frontend
-- [ ] Phase 9 — Response Verification Layer (lightweight hallucination checker)
+```powershell
+docker-compose exec ai-python python scripts/ingest_corpus.py
+```
 
----
+This script:
+- Scrapes configured sources when available
+- Falls back to bundled clinical techniques
+- Embeds chunks with FastEmbed (`BAAI/bge-small-en-v1.5`)
+- Upserts into Qdrant collection `knowledge_base`
+
+## Frontend Notes
+
+- Frontend lives in `frontend-nextjs` and is already integrated.
+- UI is a custom cyberpunk console with:
+  - typewriter response rendering
+  - chat request forwarding to gateway
+  - neon/glass styled interface
+- Docker-first workflow means host `node_modules` and `.next` are not required for containerized run.
+
+## Troubleshooting
+
+- AI worker may return connection errors immediately after startup while Neo4j is still becoming ready. Retry after a few seconds.
+- If AI worker exits during boot, verify `NEO4J_AUTH` format and value.
+- If generation fails, verify `HF_TOKEN` in `.env` and token permissions.
+- If frontend works but AI calls fail, inspect:
+  - `docker-compose logs ai-python`
+  - `docker-compose logs orchestrator-node`
+  - `docker-compose logs gateway-go`
+
+## Roadmap Snapshot
+
+- [x] Layer 1 intake routing (Go)
+- [x] Layer 1 safety/entity orchestration (Node)
+- [x] Layer 2 memory infrastructure (Neo4j, Redis, Qdrant)
+- [x] Layer 3 memory distillation and retrieval (FastAPI)
+- [x] Layer 4 contextual generation with citations/confidence
+- [x] Frontend implementation (Next.js cyberpunk UI)
+- [x] Lightweight hallucination checking and response repair
 
 ## License
 
-This project is developed as a Track B competition submission.
-See [LICENSE](LICENSE) for details.
+MIT. See `LICENSE`.

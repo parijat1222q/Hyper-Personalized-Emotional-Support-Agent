@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # The Core Gateway (Frictionless ingress)
   gateway-go:
@@ -88,11 +86,18 @@ services:
     networks:
       - omninet
 
-  # Placeholder for Next.js Cyberpunk UI
+  # Next.js Cyberpunk UI
   frontend-nextjs:
-    image: alpine:latest
+    build:
+      context: ./frontend-nextjs
+      dockerfile: Dockerfile
     container_name: omnimind-frontend-nextjs
-    command: tail -f /dev/null
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - gateway-go
     networks:
       - omninet
 
