@@ -39,6 +39,7 @@ from app.services.logic import (
     generate_empathetic_response,
     store_response_neo4j,
 )
+from app.db import clients
 from app.db.clients import get_client_status
 
 logger = logging.getLogger(__name__)
@@ -269,8 +270,11 @@ async def retrieve_memory(request: MemoryRetrieveRequest):
         vector_results = search_vector_qdrant(request.query, limit=limit)
         logger.info(f"  Vector: {len(vector_results)} results")
         
-        # 2. Keyword search (pass empty list as no documents available)
-        keyword_results = search_keyword_bm25(request.query, [], limit=limit)
+        # Extract corpus for BM25 from vector results
+        corpus_docs = [r[2]["content"] for r in vector_results] if vector_results else []
+
+        # 2. Keyword search
+        keyword_results = search_keyword_bm25(request.query, corpus_docs, limit=limit) if corpus_docs else []
         logger.info(f"  Keyword: {len(keyword_results)} results")
         
         # 3. Graph search
@@ -363,11 +367,23 @@ async def generate_response(request: GenerateRequest):
         )
         
         retrieve_response = await retrieve_memory(retrieve_request)
+
+        # Fetch short-term memory from Redis
+        short_term_history = []
+        if clients.redis_client and request.session_id:
+            try:
+                # Get last 6 messages (3 turns)
+                history = clients.redis_client.lrange(f"session:{request.session_id}:history", 0, 5)
+                short_term_history = [msg for msg in reversed(history)] if history else []
+            except Exception as e:
+                logger.warning(f"Could not fetch Redis history: {e}")
         
         # Prepare context payload for LLM (removed conversation_history and user_preferences)
         context_payload = {
             "user_id": request.user_id,
+            "session_id": request.session_id,
             "query": request.query,
+            "recent_conversation": short_term_history,
             "retrieved_documents": [
                 {
                     "title": result.title,

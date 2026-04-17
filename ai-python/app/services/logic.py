@@ -12,6 +12,7 @@ This module contains all backend operations:
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Tuple
@@ -60,22 +61,20 @@ Focus on: emotions, behaviors, triggers, symptoms, relationships, and experience
             logger.error("✗ LLM returned empty response")
             raise ValueError("LLM returned empty response for triple extraction")
         
-        # Parse JSON from response
-        try:
-            # Try to extract JSON from response
-            json_start = response_text.find('[')
-            json_end = response_text.rfind(']') + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
+        # Parse JSON from response using regex
+        match = re.search(r'\[\s*\{.*?\}\s*\]', response_text, re.DOTALL | re.IGNORECASE)
+        if match:
+            json_str = match.group(0)
+            try:
                 triples = json.loads(json_str)
                 if isinstance(triples, list):
-                    return triples[:10]  # Limit to 10 triples
-            else:
-                logger.error(f"✗ Failed to find JSON array in LLM response: {response_text}")
-                raise ValueError("LLM response does not contain valid JSON array")
-        except json.JSONDecodeError as je:
-            logger.error(f"✗ Failed to parse JSON from LLM response: {response_text}")
-            raise ValueError(f"JSON parse error: {je}")
+                    return triples[:10]
+            except json.JSONDecodeError as je:
+                logger.error(f"✗ Failed to parse extracted JSON: {je}")
+                raise ValueError(f"JSON parse error: {je}")
+        else:
+            logger.error(f"✗ Failed to find JSON array in LLM response: {response_text}")
+            raise ValueError("LLM response does not contain valid JSON array")
         
     except Exception as e:
         logger.error(f"✗ LLM extraction error: {e}")
@@ -485,6 +484,9 @@ Personalization Guidelines:
 
 {f'Retrieved Context Information:' if formatted_context else ''}
 {formatted_context}
+
+Recent Conversation History:
+{context_payload.get('recent_conversation', 'No recent history.')}
 
 Respond concisely but thoroughly. Be genuine and helpful. NEVER start responses with "As an AI..." or generic phrases."""
         

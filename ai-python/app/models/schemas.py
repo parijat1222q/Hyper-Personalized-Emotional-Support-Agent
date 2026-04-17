@@ -93,6 +93,7 @@ class MemoryRetrieveResponse(BaseModel):
 class GenerateRequest(BaseModel):
     """Request for empathetic response generation"""
     user_id: str
+    session_id: Optional[str] = None
     query: str
     context: Optional[Dict[str, Any]] = None
     tone: str = "empathetic"  # empathetic, supportive, analytical, motivational

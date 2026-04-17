@@ -58,26 +58,51 @@ const checkRiskGuardrails = (content: string) => {
     return { riskFound: false, level: 'SAFE' };
 };
 
-app.post('/api/analyze', (req: Request, res: Response) => {
+app.post('/api/analyze', async (req: Request, res: Response) => {
     const { user_id, content } = req.body;
     console.log(`\n[Node Orchestrator] Processing input for ${user_id}`);
 
-    // Step 1: Safety & Risk Escalation Guardrails
-    const riskAssessment = checkRiskGuardrails(content);
-    if (riskAssessment.riskFound) {
-        console.warn(`[CRISIS ESCALATION] HIGH RISK DETECTED: Trigger="${riskAssessment.trigger}"`);
-        // Antigravity action: Instantly route to crisis worker, halt standard processing.
-        return res.status(200).json({ status: 'escalated', alert: 'Crisis intervention triggered.' });
+    try {
+        // Step 1: Safety & Risk Escalation Guardrails
+        const riskAssessment = checkRiskGuardrails(content);
+        if (riskAssessment.riskFound) {
+            console.warn(`[CRISIS ESCALATION] HIGH RISK DETECTED: Trigger="${riskAssessment.trigger}"`);
+            // Antigravity action: Instantly route to crisis worker, halt standard processing.
+            return res.status(200).json({ status: 'escalated', alert: 'Crisis intervention triggered.' });
+        }
+
+        // Step 2: Multi-Turn Entity Resolution (NLP-safe coreference)
+        const resolvedText = resolveEntities(content);
+        console.log(`[Node Orchestrator] Resolved Input: ${resolvedText}`);
+
+        // Forward to Python AI Worker
+        console.log(`[Orchestrator] Forwarding resolved text to Python AI Worker...`);
+        const pythonResponse = await fetch('http://ai-python:5000/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id: user_id,
+                query: resolvedText,
+                tone: 'empathetic',
+                include_citations: true
+            })
+        });
+
+        if (!pythonResponse.ok) {
+            throw new Error(`Python Worker responded with status: ${pythonResponse.status}`);
+        }
+
+        const aiData = await pythonResponse.json();
+
+        // Return the final generated AI response back to the Go Gateway
+        return res.status(200).json(aiData);
+    } catch (error) {
+        console.error(`[Orchestrator Error] ${error}`);
+        return res.status(500).json({
+            status: 'error',
+            message: 'Failed to process request via Python AI Worker.'
+        });
     }
-
-    // Step 2: Multi-Turn Entity Resolution (NLP-safe coreference)
-    const resolvedContent = resolveEntities(content);
-    console.log(`[Node Orchestrator] Resolved Input: ${resolvedContent}`);
-
-    // Step 3: Proceed to Semantic Knowledge Graph & AI prediction layers...
-    // -> Enqueue via Redis/RabbitMQ to Python workers.
-
-    res.status(200).json({ status: 'success', message: 'Input safely analyzed and queued.', resolved_content: resolvedContent });
 });
 
 const PORT = 4000;

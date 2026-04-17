@@ -40,14 +40,16 @@ MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-120b:fastest")
 
 # Neo4j Configuration
 NEO4J_URL = os.getenv("NEO4J_URI", os.getenv("NEO4J_URL", "bolt://neo4j-graph:7687"))
-NEO4J_AUTH = os.getenv("NEO4J_AUTH", "neo4j/password")
+NEO4J_AUTH = os.getenv("NEO4J_AUTH")
+
+if not NEO4J_AUTH:
+    raise ValueError("NEO4J_AUTH environment variable is required and must be set")
 
 # Parse NEO4J_AUTH (format: "user/password")
 if "/" in NEO4J_AUTH:
     NEO4J_USER, NEO4J_PASSWORD = NEO4J_AUTH.split("/", 1)
 else:
-    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+    raise ValueError("NEO4J_AUTH must be in the format 'user/password'")
 
 # Redis Configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "redis-memory")
