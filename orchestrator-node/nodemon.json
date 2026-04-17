@@ -1,8 +1,7 @@
 {
   "watch": ["src"],
   "ext": "ts,json",
-  "exec": "node --no-warnings=ExperimentalWarning --loader ts-node/esm",
-  "args": "src/index.ts",
+  "exec": "node --no-warnings=ExperimentalWarning --loader ts-node/esm src/index.ts",
   "env": {
     "NODE_OPTIONS": "--loader ts-node/esm",
     "TS_NODE_ESMODULE": "true",

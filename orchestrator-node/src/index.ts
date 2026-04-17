@@ -1,5 +1,4 @@
 import express, { Request, Response } from 'express';
-import nlp from 'compromise';
 
 const app = express();
 app.use(express.json());
@@ -24,20 +23,14 @@ app.use(express.json());
  */
 const resolveEntities = (input: string): string => {
     try {
-        // Parse text with compromise NLP
-        const doc = nlp(input);
+        if (!input || typeof input !== 'string') {
+            return '';
+        }
 
-        // Tag pronouns with consistent NLP POS tagging
-        // Compromise identifies pronouns correctly as grammatical units
-        doc.match('(he|she|it|him|her|they|them|i|me|you)').tag('Pronoun');
-
-        // Replace only standalone pronouns (not substring matches)
-        const resolved = doc
-            .match('Pronoun')
-            .replaceWith('[Target_Entity]')
-            .text();  // Extract final text with replacements applied
-
-        return resolved;
+        // Replace only standalone pronouns using word boundaries.
+        // This avoids corrupting substrings like "sheet" or "heritage".
+        const pronounPattern = /\b(he|she|it|him|her|they|them|i|me|you)\b/gi;
+        return input.replace(pronounPattern, '[Target_Entity]');
     } catch (error) {
         console.error(`[NLP Resolution Error] ${error}`);
         // Fail-safe: return original input on parsing error

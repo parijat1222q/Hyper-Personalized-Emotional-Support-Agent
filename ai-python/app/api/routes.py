@@ -55,14 +55,14 @@ router = APIRouter()
 async def health_check():
     """Check service health and database connectivity"""
     try:
-        status_info = await get_client_status()
+        status_info = get_client_status()
         
         all_healthy = all([
             status_info.get("neo4j"),
             status_info.get("redis"),
             status_info.get("qdrant"),
-            status_info.get("hf_api"),
-            status_info.get("httpx")
+            status_info.get("hf_client"),
+            status_info.get("httpx_client")
         ])
         
         if all_healthy:

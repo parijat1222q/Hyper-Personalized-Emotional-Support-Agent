@@ -12,4 +12,4 @@ COPY . .
 EXPOSE 4000
 
 # Start script with nodemon config for ESM support
-CMD ["npx", "nodemon"]
+CMD ["npx", "nodemon", "src/index.ts"]
