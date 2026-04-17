@@ -175,14 +175,22 @@ export default function Home() {
 
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
 
-        const gatewayMessage =
-          typeof apiData?.message === "string"
-            ? apiData.message
-            : "Distillation queued successfully.";
+        // Extract the actual AI response from the orchestrator/AI worker payload
+        let displayResponse = "Request processed. Awaiting response...";
+        
+        if (response.ok && apiData) {
+          // The gateway now forwards the orchestrator's full response
+          const generatedResponse = (apiData as Record<string, unknown>)
+            ?.generated_response as Record<string, unknown> | undefined;
+          
+          if (generatedResponse?.response_text) {
+            displayResponse = generatedResponse.response_text as string;
+          }
+        }
 
         const aiResponse = response.ok
-          ? `GO-GATEWAY uplink accepted the packet.\n${gatewayMessage}\n\nRunning synthetic cognition pass for: \"${trimmedInput}\"`
-          : "Gateway returned a non-OK status. Check service logs and retry the request.";
+          ? displayResponse
+          : "Gateway error. Check service logs and retry.";
 
         const assistantMessage = createMessage("assistant", aiResponse, true);
         setTypingMessageId(assistantMessage.id);
@@ -192,7 +200,7 @@ export default function Home() {
 
         const fallbackResponse = createMessage(
           "assistant",
-          "Unable to reach http://localhost:8080/api/intake. Verify docker services, then retry.",
+          "Unable to reach http://localhost:8080/api/intake. Check that docker-compose services are running.",
           true,
         );
 

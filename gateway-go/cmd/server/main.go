@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -76,10 +77,29 @@ func initHTTPClient() *http.Client {
 	// Create custom client with transport and timeout
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   15 * time.Second, // Overall request timeout (includes body read/write)
+		Timeout:   30 * time.Second, // Overall request timeout (increased for AI generation)
 	}
 
 	return client
+}
+
+// EnableCORS adds CORS headers to responses
+func EnableCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Allow all origins (for development; restrict in production)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+		w.Header().Set("Access-Control-Max-Age", "3600")
+
+		// Handle preflight requests
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
 }
 
 // OmniInputHandler validates and routes to the Node.js orchestrator with hardened HTTP client
@@ -150,7 +170,7 @@ func OmniInputHandler(w http.ResponseWriter, r *http.Request) {
 
 	
 	// Create a context with a timeout for this specific request
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Create HTTP request with context
@@ -192,7 +212,7 @@ func OmniInputHandler(w http.ResponseWriter, r *http.Request) {
 		// Check for specific error types
 		if ctx.Err() == context.DeadlineExceeded {
 			statusCode = http.StatusGatewayTimeout // 504
-			errorMsg = "Request to orchestrator timed out (15s limit exceeded)"
+			errorMsg = "Request to orchestrator timed out (30s limit exceeded)"
 			log.Printf("[Go Gateway] ⏱️ TIMEOUT: Request to orchestrator exceeded deadline")
 		} else if err, ok := err.(net.Error); ok && err.Timeout() {
 			statusCode = http.StatusGatewayTimeout // 504
@@ -235,19 +255,14 @@ func OmniInputHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Success: Orchestrator processed the request
+	// Success: Forward the orchestrator's response directly to the client
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(SuccessResponse{
-		Status:   "success",
-		Message:  "Request safely routed to orchestrator",
-		UserID:   input.UserID,
-		Routed:   true,
-		Metadata: map[string]interface{}{
-			"orchestrator_url": orchestratorURL,
-			"session_id":       input.SessionID,
-			"timestamp":        time.Now().Unix(),
-		},
-	})
+	
+	// Copy the orchestrator's response body directly to the client
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("[Go Gateway] ⚠️ Error copying orchestrator response: %v", err)
+	}
 
 	log.Printf("[Go Gateway] ✅ Successfully routed request for user %s", input.UserID)
 }
@@ -292,7 +307,7 @@ func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
 			"max_idle_conns":         100,
 			"max_idle_conns_per_host": 10,
 			"max_conns_per_host":     32,
-			"timeout":                "15s",
+			"timeout":                "30s",
 		},
 	})
 
@@ -304,11 +319,11 @@ func main() {
 	GlobalHTTPClient = initHTTPClient()
 	log.Println("[Go Gateway] 🔧 Hardened HTTP client initialized")
 	log.Printf("[Go Gateway] ✓ Connection Pool: MaxIdleConns=100, MaxIdleConnsPerHost=10, MaxConnsPerHost=32")
-	log.Printf("[Go Gateway] ✓ Timeouts: Overall=15s, Dial=5s, TLSHandshake=10s")
+	log.Printf("[Go Gateway] ✓ Timeouts: Overall=30s, Dial=5s, TLSHandshake=10s")
 
-	// Register handlers
-	http.HandleFunc("/api/intake", OmniInputHandler)
-	http.HandleFunc("/health", HealthCheckHandler)
+	// Register handlers with CORS support
+	http.HandleFunc("/api/intake", EnableCORS(OmniInputHandler))
+	http.HandleFunc("/health", EnableCORS(HealthCheckHandler))
 
 	// Start the gateway
 	fmt.Println("🚀 Go API Gateway running on :8080")
@@ -320,8 +335,8 @@ func main() {
 	server := &http.Server{
 		Addr:         ":8080",
 		Handler:      nil, // Use DefaultServeMux
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  90 * time.Second,
 	}
 
